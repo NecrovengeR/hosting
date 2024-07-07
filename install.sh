@@ -1,4 +1,7 @@
 #!/bin/bash
+
+CLORE_HOSTING_DIRECTORY="/opt/clore-hosting"
+
 if [ "$EUID" -ne 0 ]
   then echo "Please run as root"
   exit
@@ -28,7 +31,7 @@ if [ -x "$(command -v docker)" ]; then
   fi
 else
     apt update -y
-    apt install ca-certificates curl gnupg lsb-release tar speedtest-cli ufw -y
+    apt install ca-certificates curl gnupg lsb-release git tar speedtest-cli ufw -y
     mkdir -p /etc/apt/keyrings
     curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
     echo \
@@ -101,36 +104,131 @@ mkdir /opt/clore-hosting/startup_scripts &>/dev/null
 mkdir /opt/clore-hosting/wireguard &>/dev/null
 mkdir /opt/clore-hosting/wireguard/configs &>/dev/null
 mkdir /opt/clore-hosting/client &>/dev/null
-tar -xvf clore-hosting.tar -C /opt/clore-hosting/client &>/dev/null
-tar -xvf node-v16.18.1-linux-x64.tar.xz -C /opt/clore-hosting &>/dev/null
-rm -rf /opt/clore-hosting/client/node_modules/ &>/dev/null
 if [[ "$kernel_version" == *"$hive_str"* ]]; then
-  docker pull cloreai/clore-hive-wireguard
+  docker pull cloreai/proxy:0.2-hive
   apt remove wireguard-dkms -y &>/dev/null
-  dpkg -i /opt/clore-hosting/client/wireguard-dkms_1.0.20200623-hiveos-5.4.0.deb
+  if [[ -f "$filename" ]]; then
+    dpkg -i wireguard-dkms_1.0.20200623-hiveos-5.4.0.deb
+  else
+    curl -L "https://gitlab.com/cloreai-public/hosting/-/raw/py/wireguard-dkms_1.0.20200623-hiveos-5.4.0.deb?ref_type=heads&inline=false" -o /tmp/wireguard-dkms_1.0.20200623-hiveos-5.4.0.deb
+    dpkg -i /tmp/wireguard-dkms_1.0.20200623-hiveos-5.4.0.deb
+    rm /tmp/wireguard-dkms_1.0.20200623-hiveos-5.4.0.deb
+  fi
 fi
-rm /opt/clore-hosting/client/wireguard-dkms_1.0.20200623-hiveos-5.4.0.deb &>/dev/null
-rm /opt/clore-hosting/service.sh &>/dev/null
-rm /opt/clore-hosting/clore.sh &>/dev/null
-rm /etc/systemd/system/clore-hosting.service &>/dev/null
-tee -a /opt/clore-hosting/service.sh > /dev/null <<EOT
-#!/bin/bash
-CLIENT_DIR=/opt/clore-hosting/client
-NODE=/opt/clore-hosting/node-v16.18.1-linux-x64/bin/node
-cd \$CLIENT_DIR
-while true
-do
-if test -f "\$CLIENT_DIR/auth"; then
-    \$NODE index.js -main true
+
+folder_exists() {
+    if [ -d "$1" ]; then
+        return 0  # True
+    else
+        return 1  # False
+    fi
+}
+
+# Function to check if a file exists
+file_exists() {
+    if [ -f "$1" ]; then
+        return 0  # True
+    else
+        return 1  # False
+    fi
+}
+
+if ! file_exists "$CLORE_HOSTING_DIRECTORY/.miniconda/bin/conda"; then
+    cd $CLORE_HOSTING_DIRECTORY
+    if file_exists "$CLORE_HOSTING_DIRECTORY/Miniconda3-latest-Linux-x86_64.sh"; then
+        rm Miniconda3-latest-Linux-x86_64.sh
+    fi
+    if curl -sSf https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -o Miniconda3-latest-Linux-x86_64.sh; then
+        echo "Miniconda downloaded"
+    else
+        echo "Failed downloading miniconda"
+        exit 1
+    fi
+    chmod +x Miniconda3-latest-Linux-x86_64.sh
+    bash Miniconda3-latest-Linux-x86_64.sh -b -p /opt/clore-hosting/.miniconda && rm Miniconda3-latest-Linux-x86_64.sh
+    if [ $? -ne 0 ]; then
+        echo "Failed installing miniconda"
+        exit 1
+    fi
 fi
-sleep 1
-done
-EOT
+
+if ! file_exists "$CLORE_HOSTING_DIRECTORY/.miniconda/bin/conda"; then
+    echo "Failed to locate miniconda"
+    exit 1
+else
+    if ! folder_exists "$CLORE_HOSTING_DIRECTORY/.miniconda-env"; then
+        /opt/clore-hosting/.miniconda/bin/conda create -y -k --prefix /opt/clore-hosting/.miniconda-env python=3.12.1 -y
+        if [ $? -ne 0 ]; then
+            if folder_exists "$CLORE_HOSTING_DIRECTORY/.miniconda-env"; then
+                rm /opt/clore-hosting/.miniconda-env
+            fi
+            echo "Failed creating python environment"
+            exit 1
+        fi
+    fi
+fi
+
+cd $CLORE_HOSTING_DIRECTORY
+
+if folder_exists "$CLORE_HOSTING_DIRECTORY/hosting"; then
+    rm -rf "$CLORE_HOSTING_DIRECTORY/hosting"
+fi
+git clone https://git.clore.ai/clore/hosting.git
+if [ $? -ne 0 ]; then
+    echo "cloning https://git.clore.ai/clore/hosting.git failed. Exiting the script."
+    exit 1
+fi
+
+cd hosting
+
+source /opt/clore-hosting/.miniconda/etc/profile.d/conda.sh && conda activate /opt/clore-hosting/.miniconda-env && pip install -r requirements.txt
+
+if [ $? -ne 0 ]; then
+    echo "Failed installing requirements"
+    exit 1
+fi
+
+if file_exists "/opt/clore-hosting/clore.sh"; then
+    rm /opt/clore-hosting/clore.sh
+fi
+
 tee -a /opt/clore-hosting/clore.sh > /dev/null <<EOT
 #!/bin/bash
-cd /opt/clore-hosting/client
-/opt/clore-hosting/node-v16.18.1-linux-x64/bin/node index.js "\$@"
+source /opt/clore-hosting/.miniconda/etc/profile.d/conda.sh && conda activate /opt/clore-hosting/.miniconda-env
+cd /opt/clore-hosting/hosting
+python3 hosting.py "\$@"
 EOT
+chmod +x /opt/clore-hosting/clore.sh
+if file_exists "/opt/clore-hosting/service.sh"; then
+    rm /opt/clore-hosting/service.sh
+fi
+tee -a /opt/clore-hosting/service.sh > /dev/null <<'EOT'
+#!/bin/bash
+source /opt/clore-hosting/.miniconda/etc/profile.d/conda.sh && conda activate /opt/clore-hosting/.miniconda-env
+CLIENT_DIR=/opt/clore-hosting/hosting
+cd $CLIENT_DIR
+counter=0
+
+while true
+do
+    if test -f "/opt/clore-hosting/client/auth"; then
+        # Run pip install on the first iteration and every 15th iteration thereafter
+        if [ $((counter % 15)) -eq 0 ]; then
+            echo "Installing dependencies..."
+            pip install -r requirements.txt
+        fi
+        
+        # Run the hosting software
+        python3 hosting.py --service
+    fi
+    counter=$((counter + 1))
+    sleep 5
+done
+EOT
+
+if file_exists "/etc/systemd/system/clore-hosting.service"; then
+    rm /etc/systemd/system/clore-hosting.service
+fi
 tee -a /etc/systemd/system/clore-hosting.service > /dev/null <<EOT
 [Unit]
 Description=CLORE.AI Hosting service
@@ -143,23 +241,23 @@ Restart=always
 [Install]
 WantedBy=multi-user.target
 EOT
+
 chmod +x /opt/clore-hosting/service.sh
-chmod +x /opt/clore-hosting/clore.sh
 systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
 systemctl enable clore-hosting.service
 systemctl enable docker.service
 systemctl enable docker.socket
-export PATH="/opt/clore-hosting/node-v16.18.1-linux-x64/bin/:$PATH"
+
 if test -f "$AUTH_FILE"; then
-  cd /opt/clore-hosting/client
-#  npm update
-  /opt/clore-hosting/node-v16.18.1-linux-x64/bin/node /opt/clore-hosting/node-v16.18.1-linux-x64/bin/npm update
+  source /opt/clore-hosting/.miniconda/etc/profile.d/conda.sh && conda activate /opt/clore-hosting/.miniconda-env
+  cd /opt/clore-hosting/hosting
+  pip install -r requirements.txt
   systemctl restart clore-hosting.service
-  echo "Your machine is updated to latest hosting software (v4.0)"
+  echo "Your machine is updated to latest hosting software (v5.1)"
 else
-  cd /opt/clore-hosting/client
-#  npm update
-  /opt/clore-hosting/node-v16.18.1-linux-x64/bin/node /opt/clore-hosting/node-v16.18.1-linux-x64/bin/npm update
+  source /opt/clore-hosting/.miniconda/etc/profile.d/conda.sh && conda activate /opt/clore-hosting/.miniconda-env
+  cd /opt/clore-hosting/hosting
+  pip install -r requirements.txt
   echo "------INSTALATION COMPLETE------"
   echo "For connection to clore ai use /opt/clore-hosting/clore.sh --init-token <token>"
   echo "and then reboot"
